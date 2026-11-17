@@ -35,8 +35,18 @@ player.events.on('debug', (queue, message) => {
 });
 
 // Load Extractors using the new supported method
-await player.extractors.loadMulti(DefaultExtractors); 
+// await player.extractors.loadMulti(DefaultExtractors); 
+// await player.extractors.register(YoutubeExtractor, {});
+
+
+// Filter out the broken default YouTube extractor so it doesn't intercept requests
+const workingExtractors = DefaultExtractors.filter(ext => ext.name !== 'YouTubeExtractor');
+await player.extractors.loadMulti(workingExtractors);
+
+// Register the working YouTubei Extractor
 await player.extractors.register(YoutubeExtractor, {});
+
+
 
 client.commands = new Collection();
 
