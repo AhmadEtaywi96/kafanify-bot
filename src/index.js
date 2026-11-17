@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 // import { YoutubeExtractor } from 'discord-player-youtubei';
+import { YoutubeExtractor } from 'discord-player-youtube';
 
 dotenv.config();
 
@@ -41,7 +42,10 @@ player.events.on('debug', (queue, message) => {
 
 await player.extractors.loadMulti(DefaultExtractors);
 
-
+// Register the working YouTube extractor
+await player.extractors.register(YoutubeExtractor, {
+    disableYTJSLog: true
+});
 
 client.commands = new Collection();
 
