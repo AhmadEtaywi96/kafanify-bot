@@ -22,6 +22,18 @@ const client = new Client({
 // Initialize player
 const player = new Player(client);
 
+player.events.on('error', (queue, error) => {
+    console.log(`[Queue Error] ${error.message}`);
+});
+
+player.events.on('playerError', (queue, error) => {
+    console.log(`[Audio Stream Error] ${error.message}`);
+});
+
+player.events.on('debug', (queue, message) => {
+    console.log(`[Player Debug] ${message}`);
+});
+
 // Load Extractors using the new supported method
 await player.extractors.loadMulti(DefaultExtractors); 
 await player.extractors.register(YoutubeExtractor, {});
