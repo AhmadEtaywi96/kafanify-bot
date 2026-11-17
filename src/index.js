@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { YoutubeExtractor } from 'discord-player-youtubei';
+// import { YoutubeExtractor } from 'discord-player-youtubei';
 
 dotenv.config();
 
@@ -39,12 +39,7 @@ player.events.on('debug', (queue, message) => {
 // await player.extractors.register(YoutubeExtractor, {});
 
 
-// Filter out the broken default YouTube extractor so it doesn't intercept requests
-const workingExtractors = DefaultExtractors.filter(ext => ext.name !== 'YouTubeExtractor');
-await player.extractors.loadMulti(workingExtractors);
-
-// Register the working YouTubei Extractor
-await player.extractors.register(YoutubeExtractor, {});
+await player.extractors.loadMulti(DefaultExtractors);
 
 
 
