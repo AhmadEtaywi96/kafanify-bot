@@ -1,5 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { useMainPlayer } from 'discord-player';
+import { buildQueueOptions } from '../../utils/queueOptions.js';
 
 export default {
     data: new SlashCommandBuilder()
@@ -26,9 +27,7 @@ export default {
 
         try {
             const { track } = await player.play(channel, query, {
-                nodeOptions: {
-                    metadata: interaction
-                }
+                nodeOptions: buildQueueOptions(interaction)
             });
 
             return interaction.followUp(`**${track.title}** has been added to the queue!`);

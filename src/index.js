@@ -1,17 +1,27 @@
 import { Client, GatewayIntentBits, Collection } from 'discord.js';
 import { Player } from 'discord-player';
 import { DefaultExtractors } from '@discord-player/extractor';
+import { YoutubeExtractor } from 'discord-player-youtubei';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-// import { YoutubeExtractor } from 'discord-player-youtubei';
-import { YoutubeExtractor } from 'discord-player-youtube';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Max Opus bitrate supported by discord-player's encoder (it clamps to 128 kbps)
+const OPUS_BITRATE = 128_000;
+const DEBUG = process.env.DEBUG === '1';
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[Unhandled Rejection]', reason);
+});
+process.on('uncaughtException', (error) => {
+    console.error('[Uncaught Exception]', error);
+});
 
 const client = new Client({
     intents: [
@@ -20,32 +30,37 @@ const client = new Client({
     ]
 });
 
-// Initialize player
 const player = new Player(client);
 
 player.events.on('error', (queue, error) => {
-    console.log(`[Queue Error] ${error.message}`);
+    console.error(`[Queue Error] ${error.message}`);
 });
 
-player.events.on('playerError', (queue, error) => {
-    console.log(`[Audio Stream Error] ${error.message}`);
+player.events.on('playerError', (queue, error, track) => {
+    console.error(`[Audio Stream Error] ${track?.title ?? ''} -> ${error.message}`);
+    queue.metadata?.channel?.send(`⚠️ Could not play **${track?.title ?? 'this track'}**, skipping.`).catch(() => {});
 });
 
-player.events.on('debug', (queue, message) => {
-    console.log(`[Player Debug] ${message}`);
+player.events.on('playerStart', (queue, track) => {
+    // Encode at the highest Opus bitrate so music isn't squeezed into voice-quality
+    queue.node.setBitrate(OPUS_BITRATE);
+    queue.metadata?.channel?.send(`🎶 Now playing **${track.title}**`).catch(() => {});
 });
 
-// Load Extractors using the new supported method
-// await player.extractors.loadMulti(DefaultExtractors); 
-// await player.extractors.register(YoutubeExtractor, {});
+if (DEBUG) {
+    player.events.on('debug', (queue, message) => console.log(`[Queue Debug] ${message}`));
+    player.on('debug', (message) => console.log(`[Player Debug] ${message}`));
+}
 
-
-await player.extractors.loadMulti(DefaultExtractors);
-
-// Register the working YouTube extractor
+// YouTube first: yt-dlp gives YouTube's native Opus stream (itag 251), the cleanest source.
+// The innertube methods remain as fallbacks.
 await player.extractors.register(YoutubeExtractor, {
-    disableYTJSLog: true
+    disableYTJSLog: true,
+    downloads: {
+        trialOrder: ['yt-dlp', 'adaptive', 'sabr']
+    }
 });
+await player.extractors.loadMulti(DefaultExtractors);
 
 client.commands = new Collection();
 

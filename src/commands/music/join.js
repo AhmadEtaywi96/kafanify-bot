@@ -1,5 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { useMainPlayer } from 'discord-player';
+import { buildQueueOptions } from '../../utils/queueOptions.js';
 
 export default {
     data: new SlashCommandBuilder()
@@ -15,9 +16,7 @@ export default {
         }
 
         // Initialize the queue for this server
-        const queue = player.nodes.create(interaction.guild, {
-            metadata: interaction
-        });
+        const queue = player.nodes.create(interaction.guild, buildQueueOptions(interaction));
 
         try {
             // Check if the bot is already connected to a channel
