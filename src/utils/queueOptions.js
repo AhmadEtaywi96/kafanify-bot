@@ -12,7 +12,10 @@ export function buildQueueOptions(interaction) {
         leaveOnEndCooldown: 60_000,
         leaveOnEmpty: true,
         leaveOnEmptyCooldown: 60_000,
-        bufferingTimeout: 3_000,
+        leaveOnStop: true,
+        leaveOnStopCooldown: 60_000,
+        // Only applies to seek replays: keep it short so ⏪ feels responsive
+        bufferingTimeout: 1_000,
         // Unused DSP stages: skipping them keeps the signal clean and saves CPU.
         // Volume and seeker stay enabled.
         disableBiquad: true,

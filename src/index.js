@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { showPanel, refreshPanel, closePanel } from './player/nowPlaying.js';
 
 dotenv.config();
 
@@ -41,11 +42,19 @@ player.events.on('playerError', (queue, error, track) => {
     queue.metadata?.channel?.send(`⚠️ Could not play **${track?.title ?? 'this track'}**, skipping.`).catch(() => {});
 });
 
-player.events.on('playerStart', (queue, track) => {
-    // Encode at the highest Opus bitrate so music isn't squeezed into voice-quality
+// Fires for every new audio resource, including seek replays, which create a fresh encoder.
+// Encode at the highest Opus bitrate so music isn't squeezed into voice quality.
+player.events.on('playerTrigger', (queue) => {
     queue.node.setBitrate(OPUS_BITRATE);
-    queue.metadata?.channel?.send(`🎶 Now playing **${track.title}**`).catch(() => {});
 });
+
+// Now Playing panel lifecycle
+player.events.on('playerStart', (queue) => showPanel(queue));
+player.events.on('playerPause', (queue) => refreshPanel(queue));
+player.events.on('playerResume', (queue) => refreshPanel(queue));
+player.events.on('emptyQueue', (queue) => closePanel(queue.guild.id, '✅ Queue finished'));
+player.events.on('disconnect', (queue) => closePanel(queue.guild.id, '👋 Disconnected'));
+player.events.on('queueDelete', (queue) => closePanel(queue.guild.id, '👋 Disconnected'));
 
 if (DEBUG) {
     player.events.on('debug', (queue, message) => console.log(`[Queue Debug] ${message}`));
