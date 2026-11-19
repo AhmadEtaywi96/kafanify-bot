@@ -41,7 +41,7 @@ export function buildPanel(queue) {
     const embed = new EmbedBuilder()
         .setColor(paused ? COLOR_PAUSED : COLOR_PLAYING)
         .setAuthor({ name: paused ? '⏸️ Paused' : '▶️ Now Playing' })
-        .setTitle(track.title.slice(0, 256))
+        .setTitle((track.title || 'Unknown title').slice(0, 256))
         .setURL(track.url || null)
         .setDescription(progressLine(queue))
         .addFields(
@@ -50,7 +50,7 @@ export function buildPanel(queue) {
             { name: 'Volume', value: `${queue.node.volume}%`, inline: true },
             {
                 name: `Up next${queued > 1 ? ` (${queued} in queue)` : ''}`,
-                value: next ? `${next.title.slice(0, 200)} — \`${next.duration}\`` : 'Nothing queued',
+                value: next ? `${(next.title || 'Unknown title').slice(0, 200)} — \`${next.duration}\`` : 'Nothing queued',
             },
         );
     if (track.thumbnail) embed.setThumbnail(track.thumbnail);
@@ -91,7 +91,13 @@ export async function refreshPanel(queue) {
     const entry = panels.get(queue.guild.id);
     if (!entry || !queue.currentTrack) return;
 
-    const payload = buildPanel(queue);
+    let payload;
+    try {
+        payload = buildPanel(queue);
+    } catch (error) {
+        console.error('[NowPlaying] Could not build panel:', error.message);
+        return;
+    }
     const render = JSON.stringify(payload);
     if (render === entry.lastRender) return;
 
@@ -116,9 +122,10 @@ export async function showPanel(queue) {
     panels.delete(guildId);
     previous?.message.delete().catch(() => {});
 
-    const payload = buildPanel(queue);
+    let payload;
     let message;
     try {
+        payload = buildPanel(queue);
         message = await channel.send(payload);
     } catch (error) {
         console.error('[NowPlaying] Could not send panel:', error.message);
