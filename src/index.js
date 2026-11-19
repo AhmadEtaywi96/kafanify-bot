@@ -45,7 +45,12 @@ player.events.on('playerError', (queue, error, track) => {
 // Fires for every new audio resource, including seek replays, which create a fresh encoder.
 // Encode at the highest Opus bitrate so music isn't squeezed into voice quality.
 player.events.on('playerTrigger', (queue) => {
-    queue.node.setBitrate(OPUS_BITRATE);
+    // If the source stream already died (e.g. yt-dlp failed), the encoder is gone; don't throw.
+    try {
+        queue.node.setBitrate(OPUS_BITRATE);
+    } catch (err) {
+        if (DEBUG) console.warn('[Bitrate] encoder not available:', err.message);
+    }
 });
 
 // Now Playing panel lifecycle
