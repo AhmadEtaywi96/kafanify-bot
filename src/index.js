@@ -68,10 +68,37 @@ if (DEBUG) {
 
 // YouTube first: yt-dlp gives YouTube's native Opus stream (itag 251), the cleanest source.
 // The innertube methods remain as fallbacks.
+// YouTube blocks datacenter IPs ("Sign in to confirm you're not a bot"), so on a server we
+// authenticate with a Netscape-format cookies.txt. Without the file, behaviour is unchanged.
+const COOKIES_PATH = process.env.YT_COOKIES_PATH || path.join(__dirname, '..', 'cookies.txt');
+
+/** Reads a Netscape cookies.txt and returns a `name=value; ...` header for youtube.com, or null. */
+function loadYoutubeCookies(file) {
+    if (!fs.existsSync(file)) return null;
+    const pairs = [];
+    for (let line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+        if (line.startsWith('#HttpOnly_')) line = line.slice('#HttpOnly_'.length);
+        else if (!line.trim() || line.startsWith('#')) continue;
+        const cols = line.split('\t');
+        if (cols.length < 7) continue;
+        if (!cols[0].endsWith('youtube.com')) continue;
+        pairs.push(`${cols[5]}=${cols[6].trim()}`);
+    }
+    return pairs.length ? pairs.join('; ') : null;
+}
+
+const ytCookie = loadYoutubeCookies(COOKIES_PATH);
+const hasCookieFile = fs.existsSync(COOKIES_PATH);
+if (ytCookie) console.log(`[YouTube] Using cookies from ${COOKIES_PATH}`);
+else if (hasCookieFile) console.warn(`[YouTube] ${COOKIES_PATH} has no youtube.com cookies`);
+else console.log('[YouTube] No cookies file found, running without authentication');
+
 await player.extractors.register(YoutubeExtractor, {
     disableYTJSLog: true,
+    ...(ytCookie && { cookie: ytCookie }),
     downloads: {
-        trialOrder: ['yt-dlp', 'adaptive', 'sabr']
+        trialOrder: ['yt-dlp', 'adaptive', 'sabr'],
+        ...(hasCookieFile && { ytdlp: { cookiePath: COOKIES_PATH } })
     }
 });
 await player.extractors.loadMulti(DefaultExtractors);
