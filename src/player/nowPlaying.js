@@ -1,34 +1,72 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import {
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ContainerBuilder,
+    MediaGalleryBuilder,
+    MediaGalleryItemBuilder,
+    MessageFlags,
+    SeparatorBuilder,
+    SeparatorSpacingSize,
+    TextDisplayBuilder,
+} from 'discord.js';
 
-const UPDATE_INTERVAL_MS = 10_000;
+const UPDATE_INTERVAL_MS = 5_000;
+/** An edit slower than this was almost certainly held back by a rate limit. */
+const SLOW_EDIT_MS = 2_500;
+/** Ticks to skip after a slow / rate-limited edit. */
+const BACKOFF_TICKS = 1;
+const BAR_LENGTH = 20;
+
 const COLOR_PLAYING = 0x1db954;
 const COLOR_PAUSED = 0xf1c40f;
 const COLOR_ENDED = 0x5865f2;
 
-/** guildId -> { message, interval, lastRender } */
+const REPEAT_LABELS = ['', '🔂 Repeat track', '🔁 Repeat queue', '♾️ Autoplay'];
+
+/** guildId -> { message, interval, lastRender, editing, skipTicks, track: { title, url, thumbnail } } */
 const panels = new Map();
 
-function canSeek(queue) {
+export function canSeek(queue) {
     const track = queue.currentTrack;
     return !!track && !track.live && track.durationMS > 0;
 }
 
 function progressLine(queue) {
-    if (!canSeek(queue)) return '🔴 LIVE';
-    return queue.node.createProgressBar({
-        length: 18,
-        timecodes: true,
-        indicator: '🔘',
-        leftChar: '▬',
-        rightChar: '─',
-    }) ?? '';
+    if (!canSeek(queue)) return '🔴 **LIVE**';
+    const ts = queue.node.getTimestamp();
+    if (!ts) return '';
+    const ratio = ts.total.value > 0 ? Math.min(1, Math.max(0, ts.current.value / ts.total.value)) : 0;
+    const filled = Math.round(ratio * (BAR_LENGTH - 1));
+    const bar = '━'.repeat(filled) + '●' + '─'.repeat(BAR_LENGTH - 1 - filled);
+    return `\`${ts.current.label}\` ${bar} \`${ts.total.label}\``;
 }
 
 function button(id, label, style = ButtonStyle.Secondary, disabled = false) {
     return new ButtonBuilder().setCustomId(`np:${id}`).setLabel(label).setStyle(style).setDisabled(disabled);
 }
 
-/** Builds the embed + button rows for the current state of the queue. */
+const text = (content) => new TextDisplayBuilder().setContent(content);
+const separator = (divider = true) =>
+    new SeparatorBuilder().setDivider(divider).setSpacing(SeparatorSpacingSize.Small);
+
+function escapeMd(value) {
+    return String(value).replace(/([\\*_`~|[\]])/g, '\\$1');
+}
+
+function trackInfo(track) {
+    return {
+        title: (track?.title || 'Unknown title').slice(0, 200),
+        url: track?.url || null,
+        thumbnail: track?.thumbnail || null,
+    };
+}
+
+function titleLine({ title, url }) {
+    return url ? `## [${escapeMd(title)}](${url})` : `## ${escapeMd(title)}`;
+}
+
+/** Builds the Components V2 payload for the current state of the queue. */
 export function buildPanel(queue) {
     const track = queue.currentTrack;
     if (!track) return buildEndedPanel(null, '⏹️ Nothing is playing');
@@ -37,59 +75,89 @@ export function buildPanel(queue) {
     const seekable = canSeek(queue);
     const next = queue.tracks.at(0);
     const queued = queue.tracks.size;
+    const volume = queue.node.volume;
+    const info = trackInfo(track);
 
-    const embed = new EmbedBuilder()
-        .setColor(paused ? COLOR_PAUSED : COLOR_PLAYING)
-        .setAuthor({ name: paused ? '⏸️ Paused' : '▶️ Now Playing' })
-        .setTitle((track.title || 'Unknown title').slice(0, 256))
-        .setURL(track.url || null)
-        .setDescription(progressLine(queue))
-        .addFields(
-            { name: 'Artist', value: track.author || 'Unknown', inline: true },
-            { name: 'Requested by', value: track.requestedBy ? `<@${track.requestedBy.id}>` : 'Unknown', inline: true },
-            { name: 'Volume', value: `${queue.node.volume}%`, inline: true },
-            {
-                name: `Up next${queued > 1 ? ` (${queued} in queue)` : ''}`,
-                value: next ? `${(next.title || 'Unknown title').slice(0, 200)} — \`${next.duration}\`` : 'Nothing queued',
-            },
+    const container = new ContainerBuilder()
+        .setAccentColor(paused ? COLOR_PAUSED : COLOR_PLAYING)
+        .addTextDisplayComponents(text(paused ? '-# ⏸️ PAUSED' : '-# ▶️ NOW PLAYING'));
+
+    if (info.thumbnail) {
+        container.addMediaGalleryComponents(
+            new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(info.thumbnail)),
         );
-    if (track.thumbnail) embed.setThumbnail(track.thumbnail);
+    }
 
-    const seekRow = new ActionRowBuilder().addComponents(
-        button('seek:-30000', '⏪ 30s', ButtonStyle.Secondary, !seekable),
-        button('seek:-10000', '⏪ 10s', ButtonStyle.Secondary, !seekable),
-        paused
-            ? button('toggle', '▶️ Resume', ButtonStyle.Success)
-            : button('toggle', '⏸️ Pause', ButtonStyle.Primary),
-        button('seek:10000', '10s ⏩', ButtonStyle.Secondary, !seekable),
-        button('seek:30000', '30s ⏩', ButtonStyle.Secondary, !seekable),
-    );
-    const controlRow = new ActionRowBuilder().addComponents(
-        button('prev', '⏮️ Previous', ButtonStyle.Secondary, queue.history.isEmpty()),
-        button('skip', '⏭️ Skip', ButtonStyle.Secondary, queued === 0),
-        button('stop', '⏹️ Stop', ButtonStyle.Danger),
-        button('leave', '👋 Leave', ButtonStyle.Danger),
-    );
+    const requester = track.requestedBy ? ` · requested by <@${track.requestedBy.id}>` : '';
+    container
+        .addTextDisplayComponents(
+            text(titleLine(info)),
+            text(`**${escapeMd(track.author || 'Unknown artist')}**${requester}`),
+            text(progressLine(queue)),
+        )
+        .addSeparatorComponents(separator())
+        .addActionRowComponents(
+            new ActionRowBuilder().addComponents(
+                button('seek:-10000', '⏪ 10s', ButtonStyle.Secondary, !seekable),
+                button('prev', '⏮️', ButtonStyle.Secondary, queue.history.isEmpty()),
+                paused
+                    ? button('toggle', '▶️ Resume', ButtonStyle.Success)
+                    : button('toggle', '⏸️ Pause', ButtonStyle.Primary),
+                button('skip', '⏭️', ButtonStyle.Secondary, queued === 0),
+                button('seek:10000', '10s ⏩', ButtonStyle.Secondary, !seekable),
+            ),
+            new ActionRowBuilder().addComponents(
+                button('vol:-10', '🔉', ButtonStyle.Secondary, volume <= 0),
+                button('vol:10', '🔊', ButtonStyle.Secondary, volume >= 100),
+                button('goto', '⏱️ Go to', ButtonStyle.Secondary, !seekable),
+                button('stop', '⏹️', ButtonStyle.Danger),
+                button('leave', '👋', ButtonStyle.Danger),
+            ),
+        )
+        .addSeparatorComponents(separator());
 
-    return { embeds: [embed], components: [seekRow, controlRow] };
+    const upNext = next
+        ? `**Up next:** ${escapeMd((next.title || 'Unknown title').slice(0, 150))} · \`${next.duration}\``
+        : '**Up next:** nothing queued';
+    const status = [`🔊 ${volume}%`, `${queued} in queue`, REPEAT_LABELS[queue.repeatMode] || '']
+        .filter(Boolean)
+        .join(' · ');
+    container.addTextDisplayComponents(text(upNext), text(`-# ${status}`));
+
+    return { flags: MessageFlags.IsComponentsV2, components: [container] };
 }
 
-function buildEndedPanel(message, text) {
-    const old = message?.embeds?.[0];
-    const embed = new EmbedBuilder().setColor(COLOR_ENDED).setAuthor({ name: text });
-    if (old?.title) embed.setTitle(old.title).setURL(old.url ?? null);
-    if (old?.thumbnail?.url) embed.setThumbnail(old.thumbnail.url);
-    return { embeds: [embed], components: [] };
+function buildEndedPanel(info, statusText) {
+    const container = new ContainerBuilder()
+        .setAccentColor(COLOR_ENDED)
+        .addTextDisplayComponents(text(`-# ${statusText}`));
+    if (info) {
+        container.addTextDisplayComponents(text(titleLine(info)));
+    }
+    return { flags: MessageFlags.IsComponentsV2, components: [container] };
 }
 
 function stopTimer(entry) {
     if (entry?.interval) clearInterval(entry.interval);
 }
 
-/** Edits the existing panel with the latest state (no-op if unchanged or missing). */
+function forget(guildId, entry) {
+    stopTimer(entry);
+    if (panels.get(guildId) === entry) panels.delete(guildId);
+}
+
+/** Edits the existing panel with the latest state (no-op if unchanged, busy or missing). */
 export async function refreshPanel(queue) {
-    const entry = panels.get(queue.guild.id);
+    const guildId = queue.guild.id;
+    const entry = panels.get(guildId);
     if (!entry || !queue.currentTrack) return;
+
+    // Never stack edits: if one is still in flight (e.g. waiting on a rate limit), skip this tick.
+    if (entry.editing) return;
+    if (entry.skipTicks > 0) {
+        entry.skipTicks--;
+        return;
+    }
 
     let payload;
     try {
@@ -101,13 +169,22 @@ export async function refreshPanel(queue) {
     const render = JSON.stringify(payload);
     if (render === entry.lastRender) return;
 
+    entry.editing = true;
+    const started = Date.now();
     try {
         await entry.message.edit(payload);
         entry.lastRender = render;
-    } catch {
-        // Message was deleted or is no longer editable: stop tracking it.
-        stopTimer(entry);
-        panels.delete(queue.guild.id);
+        entry.track = trackInfo(queue.currentTrack);
+        if (Date.now() - started > SLOW_EDIT_MS) entry.skipTicks = BACKOFF_TICKS;
+    } catch (error) {
+        if (error?.status === 429 || error?.name === 'RateLimitError') {
+            entry.skipTicks = BACKOFF_TICKS;
+        } else {
+            // Message was deleted or is no longer editable: stop tracking it.
+            forget(guildId, entry);
+        }
+    } finally {
+        entry.editing = false;
     }
 }
 
@@ -118,8 +195,7 @@ export async function showPanel(queue) {
 
     const guildId = queue.guild.id;
     const previous = panels.get(guildId);
-    stopTimer(previous);
-    panels.delete(guildId);
+    forget(guildId, previous);
     previous?.message.delete().catch(() => {});
 
     let payload;
@@ -132,18 +208,24 @@ export async function showPanel(queue) {
         return;
     }
 
-    const entry = { message, interval: null, lastRender: JSON.stringify(payload) };
+    const entry = {
+        message,
+        interval: null,
+        lastRender: JSON.stringify(payload),
+        editing: false,
+        skipTicks: 0,
+        track: trackInfo(queue.currentTrack),
+    };
     entry.interval = setInterval(() => refreshPanel(queue), UPDATE_INTERVAL_MS);
     panels.set(guildId, entry);
 }
 
-/** Freezes the panel with a final status and disabled controls. */
-export async function closePanel(guildId, text) {
+/** Freezes the panel with a final status and no controls. */
+export async function closePanel(guildId, statusText) {
     const entry = panels.get(guildId);
     if (!entry) return;
-    stopTimer(entry);
-    panels.delete(guildId);
-    await entry.message.edit(buildEndedPanel(entry.message, text)).catch(() => {});
+    forget(guildId, entry);
+    await entry.message.edit(buildEndedPanel(entry.track, statusText)).catch(() => {});
 }
 
 /** Lets an interaction handler adopt the message it just updated as the tracked panel state. */

@@ -1,5 +1,5 @@
 import { Events, MessageFlags } from 'discord.js';
-import { handlePlayerButton } from '../player/controls.js';
+import { handlePlayerButton, handlePlayerModal } from '../player/controls.js';
 
 async function replyError(interaction) {
     const payload = { content: 'There was an error while executing this action!', flags: MessageFlags.Ephemeral };
@@ -13,6 +13,16 @@ export default {
         if (interaction.isButton() && interaction.customId.startsWith('np:')) {
             try {
                 await handlePlayerButton(interaction);
+            } catch (error) {
+                console.error('[Player Controls]', error);
+                await replyError(interaction);
+            }
+            return;
+        }
+
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('np:')) {
+            try {
+                await handlePlayerModal(interaction);
             } catch (error) {
                 console.error('[Player Controls]', error);
                 await replyError(interaction);
