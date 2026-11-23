@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { showPanel, refreshPanel, closePanel } from './player/nowPlaying.js';
+import { getCookiesPath, readCookiesFile, alertIfCookieFailure } from './utils/cookies.js';
 
 dotenv.config();
 
@@ -19,6 +20,8 @@ const DEBUG = process.env.DEBUG === '1';
 
 process.on('unhandledRejection', (reason) => {
     console.error('[Unhandled Rejection]', reason);
+    // yt-dlp failures surface here (discord-player-youtubei rethrows them inside a .catch).
+    alertIfCookieFailure(client, reason).catch(() => {});
 });
 process.on('uncaughtException', (error) => {
     console.error('[Uncaught Exception]', error);
@@ -35,10 +38,12 @@ const player = new Player(client);
 
 player.events.on('error', (queue, error) => {
     console.error(`[Queue Error] ${error.message}`);
+    alertIfCookieFailure(client, error).catch(() => {});
 });
 
 player.events.on('playerError', (queue, error, track) => {
     console.error(`[Audio Stream Error] ${track?.title ?? ''} -> ${error.message}`);
+    alertIfCookieFailure(client, error).catch(() => {});
     queue.metadata?.channel?.send(`⚠️ Could not play **${track?.title ?? 'this track'}**, skipping.`).catch(() => {});
 });
 
@@ -70,35 +75,27 @@ if (DEBUG) {
 // The innertube methods remain as fallbacks.
 // YouTube blocks datacenter IPs ("Sign in to confirm you're not a bot"), so on a server we
 // authenticate with a Netscape-format cookies.txt. Without the file, behaviour is unchanged.
-const COOKIES_PATH = process.env.YT_COOKIES_PATH || path.join(__dirname, '..', 'cookies.txt');
+//
+// Only yt-dlp gets the cookies. It writes rotated cookies back to the file after each run;
+// giving Innertube a frozen copy as well makes Google see an old rotated cookie reused and
+// log the session out after an hour or two. YT_INNERTUBE_COOKIES=1 restores the old behaviour.
+// yt-dlp re-reads the file on every track, so a new file uploaded with /cookies applies
+// without a restart.
+const COOKIES_PATH = getCookiesPath();
+const cookieInfo = readCookiesFile(COOKIES_PATH);
+const innertubeCookies = process.env.YT_INNERTUBE_COOKIES === '1' && cookieInfo?.header;
 
-/** Reads a Netscape cookies.txt and returns a `name=value; ...` header for youtube.com, or null. */
-function loadYoutubeCookies(file) {
-    if (!fs.existsSync(file)) return null;
-    const pairs = [];
-    for (let line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-        if (line.startsWith('#HttpOnly_')) line = line.slice('#HttpOnly_'.length);
-        else if (!line.trim() || line.startsWith('#')) continue;
-        const cols = line.split('\t');
-        if (cols.length < 7) continue;
-        if (!cols[0].endsWith('youtube.com')) continue;
-        pairs.push(`${cols[5]}=${cols[6].trim()}`);
-    }
-    return pairs.length ? pairs.join('; ') : null;
-}
-
-const ytCookie = loadYoutubeCookies(COOKIES_PATH);
-const hasCookieFile = fs.existsSync(COOKIES_PATH);
-if (ytCookie) console.log(`[YouTube] Using cookies from ${COOKIES_PATH}`);
-else if (hasCookieFile) console.warn(`[YouTube] ${COOKIES_PATH} has no youtube.com cookies`);
-else console.log('[YouTube] No cookies file found, running without authentication');
+if (!cookieInfo) console.log('[YouTube] No cookies file found, running without authentication');
+else if (!cookieInfo.ok) console.warn(`[YouTube] ${COOKIES_PATH}: ${cookieInfo.error}`);
+else console.log(`[YouTube] yt-dlp using cookies from ${COOKIES_PATH}${innertubeCookies ? ' (also Innertube)' : ''}`);
 
 await player.extractors.register(YoutubeExtractor, {
     disableYTJSLog: true,
-    ...(ytCookie && { cookie: ytCookie }),
+    ...(innertubeCookies && { cookie: cookieInfo.header }),
     downloads: {
         trialOrder: ['yt-dlp', 'adaptive', 'sabr'],
-        ...(hasCookieFile && { ytdlp: { cookiePath: COOKIES_PATH } })
+        // Always pass the path: the file may be uploaded later via /cookies.
+        ytdlp: { cookiePath: COOKIES_PATH }
     }
 });
 await player.extractors.loadMulti(DefaultExtractors);
