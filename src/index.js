@@ -7,7 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { showPanel, refreshPanel, closePanel } from './player/nowPlaying.js';
-import { getCookiesPath, readCookiesFile, alertIfCookieFailure } from './utils/cookies.js';
+import { getCookiesPath, readCookiesFile, installCookieSync, alertIfCookieFailure, alertCookieProblem } from './utils/cookies.js';
+import { scheduleYtDlpUpdates } from './utils/ytdlp.js';
 
 dotenv.config();
 
@@ -58,6 +59,33 @@ player.events.on('playerTrigger', (queue) => {
     }
 });
 
+// Detect YouTube blocks that discord-player reports as success:
+// - Innertube refused the metadata request -> track with empty title and no duration.
+// - yt-dlp exited without audio -> track "finishes" almost immediately.
+const isYoutube = (track) => /youtu.?be/.test(track?.url ?? '');
+const startedAt = new Map(); // guildId -> { track, at }
+const MIN_PLAYBACK_MS = 1500;
+
+player.events.on('playerStart', (queue, track) => {
+    startedAt.set(queue.guild.id, { track, at: Date.now() });
+    if (isYoutube(track) && !track.title && !track.durationMS) {
+        console.warn(`[YouTube] Empty metadata for ${track.url}: YouTube refused the request`);
+        alertCookieProblem(client, 'YouTube refused to return video info').catch(() => {});
+    }
+});
+
+player.events.on('playerFinish', (queue, track) => {
+    const start = startedAt.get(queue.guild.id);
+    startedAt.delete(queue.guild.id);
+    if (!start || start.track !== track || !isYoutube(track)) return;
+    if (Date.now() - start.at >= MIN_PLAYBACK_MS) return;
+    console.warn(`[YouTube] Stream produced no audio for ${track.url} (blocked, expired cookies or outdated yt-dlp)`);
+    queue.metadata?.channel?.send(
+        `⚠️ YouTube didn't send any audio for **${track.title || track.url}**. The cookies have probably expired; the bot owner has been notified.`
+    ).catch(() => {});
+    alertCookieProblem(client, 'yt-dlp got no audio from YouTube').catch(() => {});
+});
+
 // Now Playing panel lifecycle
 player.events.on('playerStart', (queue) => showPanel(queue));
 player.events.on('playerPause', (queue) => refreshPanel(queue));
@@ -76,28 +104,34 @@ if (DEBUG) {
 // YouTube blocks datacenter IPs ("Sign in to confirm you're not a bot"), so on a server we
 // authenticate with a Netscape-format cookies.txt. Without the file, behaviour is unchanged.
 //
-// Only yt-dlp gets the cookies. It writes rotated cookies back to the file after each run;
-// giving Innertube a frozen copy as well makes Google see an old rotated cookie reused and
-// log the session out after an hour or two. YT_INNERTUBE_COOKIES=1 restores the old behaviour.
-// yt-dlp re-reads the file on every track, so a new file uploaded with /cookies applies
-// without a restart.
+// cookies.txt is the single source of truth: yt-dlp reads it per track and saves rotated
+// cookies back into it, and installCookieSync() makes Innertube send the file's current
+// cookies on every request. Both clients therefore always use the same, newest cookies;
+// a frozen startup copy in Innertube made Google log the session out after an hour or two.
+// A file uploaded with /cookies applies to both from the next request, no restart.
 const COOKIES_PATH = getCookiesPath();
 const cookieInfo = readCookiesFile(COOKIES_PATH);
-const innertubeCookies = process.env.YT_INNERTUBE_COOKIES === '1' && cookieInfo?.header;
 
 if (!cookieInfo) console.log('[YouTube] No cookies file found, running without authentication');
 else if (!cookieInfo.ok) console.warn(`[YouTube] ${COOKIES_PATH}: ${cookieInfo.error}`);
-else console.log(`[YouTube] yt-dlp using cookies from ${COOKIES_PATH}${innertubeCookies ? ' (also Innertube)' : ''}`);
+else console.log(`[YouTube] Using cookies from ${COOKIES_PATH} (synced for yt-dlp and Innertube)`);
+
+if (cookieInfo?.header) installCookieSync(COOKIES_PATH);
 
 await player.extractors.register(YoutubeExtractor, {
     disableYTJSLog: true,
-    ...(innertubeCookies && { cookie: cookieInfo.header }),
+    // Needed at startup so Innertube runs as a logged-in session; the header itself is
+    // replaced with the file's current cookies by installCookieSync().
+    ...(cookieInfo?.header && { cookie: cookieInfo.header }),
     downloads: {
         trialOrder: ['yt-dlp', 'adaptive', 'sabr'],
         // Always pass the path: the file may be uploaded later via /cookies.
         ytdlp: { cookiePath: COOKIES_PATH }
     }
 });
+
+// The bot runs the yt-dlp bundled in node_modules/youtube-dl-exec, not a system install.
+scheduleYtDlpUpdates();
 await player.extractors.loadMulti(DefaultExtractors);
 
 client.commands = new Collection();

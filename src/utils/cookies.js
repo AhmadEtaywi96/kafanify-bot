@@ -2,12 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { Platform } from 'youtubei.js';
+
 // YouTube cookie handling.
 //
-// Only yt-dlp gets the cookies. yt-dlp writes rotated cookies back into the file after each
-// run. If Innertube also sent its own startup copy, Google would see an old, rotated cookie
-// reused next to the new one, treat it as a stolen session and log it out (the "works for
-// an hour, then 'Sign in to confirm you're not a bot'" problem).
+// cookies.txt is the single source of truth. yt-dlp reads it on every track and writes rotated
+// cookies back into it. Innertube (search/metadata) would normally keep the copy it got at
+// startup forever; Google then sees an old, rotated cookie reused next to the new one and logs
+// the session out after an hour or two. installCookieSync() makes Innertube send the file's
+// current cookies on every request instead.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -65,6 +68,65 @@ export function writeCookiesFile(text, file = getCookiesPath()) {
     fs.renameSync(tmp, file);
 }
 
+// --- Keep Innertube in sync with the file ----------------------------------------------
+
+let cache = { mtimeMs: -1, header: null };
+
+/** Current youtube.com cookie header from the file, re-read only when the file changes. */
+export function currentCookieHeader(file = getCookiesPath()) {
+    let mtimeMs;
+    try {
+        mtimeMs = fs.statSync(file).mtimeMs;
+    } catch {
+        return null; // file missing
+    }
+    if (mtimeMs !== cache.mtimeMs) {
+        try {
+            const header = parseCookies(fs.readFileSync(file, 'utf8')).header;
+            if (process.env.DEBUG === '1') console.log(`[YouTube] Reloaded cookies from ${file}`);
+            cache = { mtimeMs, header };
+        } catch {
+            // Mid-write or unreadable: keep the previous cookies for this request.
+            return cache.header;
+        }
+    }
+    return cache.header;
+}
+
+let syncInstalled = false;
+
+/** True when Innertube is running logged in and following the cookie file. */
+export function isCookieSyncActive() {
+    return syncInstalled;
+}
+
+/**
+ * Wraps youtubei.js's fetch so every authenticated Innertube request to youtube.com carries
+ * the cookies currently in the file (youtubei.js keeps its startup copy in a private field).
+ * The extractor still needs a `cookie` option at startup so Innertube treats the session as
+ * logged in; only the Cookie header is swapped here.
+ */
+export function installCookieSync(file = getCookiesPath()) {
+    if (syncInstalled) return;
+    syncInstalled = true;
+    const originalFetch = Platform.shim.fetch;
+    Platform.shim.fetch = (input, init) => {
+        try {
+            const headers = init?.headers;
+            if (headers instanceof Headers && headers.has('Cookie')) {
+                const url = new URL(typeof input === 'string' ? input : input.url);
+                if (url.hostname === 'youtube.com' || url.hostname.endsWith('.youtube.com')) {
+                    const header = currentCookieHeader(file);
+                    if (header) headers.set('Cookie', header);
+                }
+            }
+        } catch {
+            // Never break a request because of the sync; fall through with the original headers.
+        }
+        return originalFetch(input, init);
+    };
+}
+
 // --- Expiry alerts ---------------------------------------------------------------------
 
 const EXPIRED_PATTERNS = [
@@ -86,16 +148,21 @@ export function looksLikeCookieFailure(error) {
 
 /** DMs the bot owners (at most once per cooldown) when an error looks like expired cookies. */
 export async function alertIfCookieFailure(client, error) {
-    if (!looksLikeCookieFailure(error)) return;
+    if (looksLikeCookieFailure(error)) await alertCookieProblem(client, "YouTube asked to confirm I'm not a bot");
+}
+
+/** DMs the bot owners about a YouTube problem, at most once per cooldown. Never throws. */
+export async function alertCookieProblem(client, reason) {
     const now = Date.now();
     if (now - lastAlertAt < ALERT_COOLDOWN_MS) return;
     lastAlertAt = now;
 
-    console.warn('[YouTube] Cookies look expired or blocked ("Sign in to confirm you\'re not a bot")');
+    console.warn(`[YouTube] Cookies look expired or blocked: ${reason}`);
     const owners = getOwnerIds();
     if (!owners.length || !client?.isReady()) return;
 
-    const message = '⚠️ **YouTube cookies expired** (YouTube asked to confirm I\'m not a bot).\n'
+    const message = `⚠️ **YouTube cookies look expired** (${reason}).
+`
         + 'Export a fresh `cookies.txt` and upload it with `/cookies`. No restart needed.';
     for (const id of owners) {
         try {

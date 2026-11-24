@@ -1,5 +1,5 @@
 import { SlashCommandBuilder, MessageFlags } from 'discord.js';
-import { getOwnerIds, parseCookies, writeCookiesFile } from '../../utils/cookies.js';
+import { getOwnerIds, parseCookies, writeCookiesFile, isCookieSyncActive } from '../../utils/cookies.js';
 
 const MAX_SIZE = 1024 * 1024; // a real cookies.txt is a few KB
 
@@ -47,6 +47,7 @@ export default {
 
         console.log(`[YouTube] Cookies updated via /cookies by ${interaction.user.tag} (${result.youtubeCount} youtube.com cookies)`);
         return interaction.editReply(
-            `✅ Saved ${result.youtubeCount} YouTube cookies. They apply from the next track, no restart needed.`);
+            `✅ Saved ${result.youtubeCount} YouTube cookies. They apply from the next track, no restart needed.`
+            + (isCookieSyncActive() ? '' : '\n⚠️ The bot started without cookies, so restart it once to use them for search and video info too.'));
     },
 };
